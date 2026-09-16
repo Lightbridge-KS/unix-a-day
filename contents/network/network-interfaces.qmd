@@ -1,0 +1,170 @@
+---
+title: "Network Interfaces"
+---
+
+A **network interface** is the kernel's name for a connection point between your computer and a network. Your apps never talk to hardware directly. They hand data to the kernel, and the kernel sends it out through an interface.
+
+Think of the computer as a hospital building. The **kernel's network stack** is the mail room. **Interfaces** are the doors: the main entrance, the ambulance bay, an internal corridor. The **routing table** is the mail room's rulebook that decides which door each outgoing letter uses.
+
+```
+ ┌──────────────────────── Your Linux machine ────────────────────────┐
+ │                                                                     │
+ │   Browser      ssh      Python app        ← user space (programs)  │
+ │      │          │           │                                       │
+ │      └──────────┼───────────┘  sockets                              │
+ │                 ▼                                                   │
+ │      ┌─────────────────────────────┐                                │
+ │      │  Kernel network stack       │  ← "mail room"                 │
+ │      │  (TCP/IP + routing table)   │                                │
+ │      └──────┬─────────┬─────────┬──┘                                │
+ │             │         │         │                                   │
+ │          [ lo ]   [ enp3s0 ] [ wlp2s0 ]  ← interfaces ("doors")     │
+ │             │         │         │                                   │
+ └─────────────┼─────────┼─────────┼───────────────────────────────────┘
+               │         │         │
+          (loops back  Ethernet   Wi-Fi
+           to itself)   cable     radio
+```
+
+Every interface has a few properties:
+
+| Property | Meaning | Example |
+|---|---|---|
+| Name | How you refer to it | `enp3s0`, `lo`, `docker0` |
+| State | Up or down | `UP` |
+| MAC address | Hardware (Layer 2) address, if any | `3c:7c:3f:1a:2b:4c` |
+| IP address(es) | Layer 3 address(es) | `192.168.1.50/24` |
+| MTU | Largest packet size it will send | `1500` bytes |
+
+## Physical vs. virtual interfaces
+
+An interface does **not** have to be a real piece of hardware. The kernel treats both kinds the same way, which is what makes Linux networking so flexible.
+
+```
+                     Network interfaces
+                            │
+          ┌─────────────────┴─────────────────┐
+          │                                   │
+      PHYSICAL                             VIRTUAL
+   (backed by hardware)              (created by software)
+          │                                   │
+   ├─ enp3s0  Ethernet NIC            ├─ lo          loopback (127.0.0.1)
+   └─ wlp2s0  Wi-Fi card              ├─ docker0     Docker bridge
+                                      ├─ veth…       container "cables"
+                                      ├─ br0         software bridge
+                                      └─ wg0         WireGuard VPN tunnel
+```
+
+A virtual interface is a full citizen: it has a name, a state, addresses, and an MTU, and the routing table can point traffic at it exactly as it would at a physical card. The difference is only in what sits on the far side.
+
+**About the names.** Modern Linux uses "predictable" names that encode where the device is:
+
+```
+  en  p3  s0            wl  p2  s0
+  │   │   │             │   │   │
+  │   │   └ slot 0      │   │   └ slot 0
+  │   └ PCI bus 3       │   └ PCI bus 2
+  └ Ethernet            └ Wireless LAN
+```
+
+Older systems used `eth0` and `wlan0`, which you'll still see in tutorials and cloud VMs.
+
+## Looking at interfaces on Linux
+
+The modern tool is `ip`, from the `iproute2` package. (`ifconfig` is the older tool.)
+
+```bash
+ip link            # list interfaces (Layer 2 view: state, MAC, MTU)
+ip addr            # interfaces + IP addresses  (short: ip a)
+ip route           # the main routing table
+```
+
+Here is example output of `ip addr`, with notes:
+
+```
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 ...
+    link/loopback 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo              ← talks only to itself
+
+2: enp3s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 ... state UP
+    link/ether 3c:7c:3f:1a:2b:4c                ← real MAC address
+    inet 192.168.1.50/24 ... dynamic enp3s0     ← LAN IP from your router (DHCP)
+
+3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 ... state DOWN
+    link/ether 02:42:1f:8c:3d:9a                ← MAC, but a made-up one
+    inet 172.17.0.1/16 scope global docker0     ← the bridge's own address
+```
+
+Reading the flags is most of the skill. `UP` means the admin enabled it; `LOWER_UP` means the physical layer is actually live (cable plugged in, radio associated). `docker0` here is `UP` but has `NO-CARRIER` and `state DOWN`, which simply means no container is attached yet.
+
+## TUN and TAP devices
+
+Some virtual interfaces have a user-space program on the far side instead of a wire. These are **TUN** and **TAP** devices, and they are the mechanism behind almost every VPN on Linux.
+
+A physical interface's other end is a **wire or radio**. A TUN interface's other end is a **program**. When the kernel sends a packet out through a TUN interface, nothing goes onto a cable. Instead, the packet is handed to the program that owns the device, and that program can do whatever it likes with it — encrypt it, tunnel it, log it, drop it.
+
+```
+   Normal NIC                          TUN device
+   ──────────                          ──────────
+   kernel                              kernel
+     │                                   │
+   [enp3s0]                            [tun]
+     │                                   │
+   driver → cable                      a user-space program
+                                       reads/writes raw IP packets
+```
+
+There are two flavors:
+
+| Type | Carries | Layer | Has MAC? |
+|---|---|---|---|
+| **TUN** | IP packets | Layer 3 | No |
+| **TAP** | Ethernet frames | Layer 2 | Yes |
+
+A TUN device works at the IP level, so it needs no MAC address and no ARP. In `ip addr` output that shows up as `link/none` and a `NOARP` flag — a reliable sign that you are looking at a tunnel rather than a card.
+
+## How the kernel picks an interface
+
+An interface is only half the story. The **routing table** is what decides which door a given packet leaves by.
+
+```bash
+ip route                  # the main table
+ip route get 8.8.8.8      # "which door would this packet actually use?"
+```
+
+```
+default via 192.168.1.1 dev enp3s0 proto dhcp  ← anything not matched below
+192.168.1.0/24 dev enp3s0 proto kernel scope link src 192.168.1.50
+172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1
+```
+
+Most specific prefix wins, and `default` is the fallback. `ip route get` is the command worth remembering: rather than making you simulate the rules in your head, it asks the kernel to decide and tells you the answer.
+
+Linux can also keep **several** routing tables and consult them in order, via `ip rule`. That is how VPNs divert a slice of traffic without disturbing the main table — the subject of the next chapter.
+
+## Hands-on exercises
+
+```bash
+# Inventory
+ip link                           # every interface and its state
+ip -br addr                       # -br = brief, one line each; good for scanning
+ip -d link show docker0           # -d shows the device *kind* (bridge, tun, veth…)
+
+# Which door?
+ip route
+ip route get 8.8.8.8              # out the default route
+ip route get 127.0.0.1            # out lo
+ip route get 192.168.1.99         # a LAN neighbour: no gateway needed
+
+# Watch an interface carry traffic
+sudo tcpdump -i lo icmp           # terminal 1
+ping -c 3 127.0.0.1               # terminal 2
+```
+
+Try `ip -br addr` first. The brief view is the one you will actually use day to day; the full output is for when something is wrong.
+
+---
+
+**Summary:** A network interface is a kernel "door" for network traffic. It can be physical (`enp3s0`, `wlp2s0`) or virtual (`lo`, `docker0`, `wg0`), and the kernel treats both the same. A TUN device is a virtual interface whose far side is a user-space program rather than a wire, which is what lets a VPN encrypt packets in transit. The routing table, not the interface, decides which door each packet uses.
+
+The next chapter follows a single TUN interface — `tailscale0` — through a real packet, to see all of this working together.

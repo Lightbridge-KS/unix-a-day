@@ -1,0 +1,127 @@
+---
+title: "Virtual Interfaces in Practice: tailscale0"
+---
+
+The previous chapter covered interfaces in general: physical vs. virtual, TUN devices, and the routing table that picks between them. This chapter follows one virtual interface end to end.
+
+Tailscale is a VPN built on the **WireGuard** protocol. It creates a private network (a "tailnet") of your devices, wherever they are. `tailscale0` is the TUN interface that the Tailscale daemon, `tailscaled`, creates on Linux so that the kernel has a "door" into that private network.
+
+## Spotting it in `ip addr`
+
+On a machine running Tailscale, the interface list gains a third entry that looks unlike the others:
+
+```
+2: enp3s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 ... state UP
+    link/ether 3c:7c:3f:1a:2b:4c                ← real MAC address
+    inet 192.168.1.50/24 ... dynamic enp3s0     ← LAN IP from your router
+
+3: tailscale0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1280 ... state UNKNOWN
+    link/none                                   ← no MAC address!
+    inet 100.101.102.103/32 scope global        ← Tailscale IP
+    inet6 fd7a:115c:a1e0::1234/128 scope global
+```
+
+Every oddity here is a consequence of it being a TUN device: **no MAC** (`link/none`) and **no ARP** (`NOARP`) because it works at Layer 3, and `POINTOPOINT` because there is exactly one thing on the far side — `tailscaled` — rather than a shared segment. The `mtu 1280` and the `/32` have their own reasons, below.
+
+## Packet inside a packet
+
+Here is what happens when you run `ssh 100.88.1.20`, where that address is another machine on your tailnet:
+
+```
+ ┌───────────────────────── Machine A (100.101.102.103) ──────────────────────────┐
+ │                                                                                 │
+ │  ① ssh 100.88.1.20                                                             │
+ │        │                                                                        │
+ │        ▼                                                                        │
+ │  ② Kernel routing: "100.x.x.x → use tailscale0"                                │
+ │        │                                                                        │
+ │        ▼                                                                        │
+ │  [ tailscale0 ]  (TUN)                                                          │
+ │        │  plain IP packet                                                       │
+ │        ▼                                                                        │
+ │  ③ tailscaled (user space): encrypts with WireGuard,                           │
+ │     wraps it in a UDP packet addressed to B's *real* public IP                  │
+ │        │                                                                        │
+ │        ▼                                                                        │
+ │  ④ Kernel routing again: "public IP → use enp3s0"                              │
+ │        │                                                                        │
+ │  [ enp3s0 ]  (physical)                                                         │
+ └────────┼────────────────────────────────────────────────────────────────────────┘
+          │  encrypted UDP (default port 41641)
+          ▼
+   ~~~~~~~~ Internet / hospital LAN / home Wi-Fi ~~~~~~~~
+          │
+ ┌────────┼──────────────── Machine B (100.88.1.20) ───────────────────────────────┐
+ │  [ enp3s0 ] → tailscaled decrypts → [ tailscale0 ] → kernel → sshd  ⑤          │
+ └─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+The idea to remember is **packet inside a packet**. The same data travels through two interfaces. On `tailscale0` it is an ordinary, readable IP packet to `100.88.1.20`. On `enp3s0` it is an encrypted UDP blob addressed to the other machine's real IP. `ssh` never knows encryption or NAT traversal happened; it just sees a normal network.
+
+That also explains the remaining details in the `ip addr` output.
+
+**Why `100.x.x.x`?** Tailscale assigns addresses from `100.64.0.0/10`, a range reserved for carrier-grade NAT. It is unlikely to clash with your home or hospital LAN, which usually uses `192.168.x.x` or `10.x.x.x`. On IPv6 it uses `fd7a:115c:a1e0::/48`.
+
+**Why MTU 1280?** Encryption and the extra UDP/IP headers add bytes. If the inner packet were 1500 bytes, the wrapped packet would be too large for the physical link. A 1280-byte inner packet leaves room for the wrapping.
+
+**Why `/32`?** The interface holds just one address. Deciding which `100.x` addresses go through it is left to routing rules, described next.
+
+## How the kernel knows to use `tailscale0`
+
+This is the policy-routing mechanism the previous chapter ended on. Tailscale doesn't put its routes in the main routing table; it uses a separate table, number 52:
+
+```bash
+ip route                   # main table: default route via your router on enp3s0
+ip rule                    # rules that say "consult table 52 first"
+ip route show table 52     # Tailscale's routes
+```
+
+Example output of `ip route show table 52`:
+
+```
+100.88.1.20 dev tailscale0
+100.90.4.7  dev tailscale0
+100.100.100.100 dev tailscale0     ← Tailscale's MagicDNS resolver
+```
+
+The kernel checks the rules in order, looks in table 52, finds a match for tailnet addresses, and sends those packets through `tailscale0`. Everything else falls through to the main table and goes out `enp3s0` as usual.
+
+Keeping these routes out of the main table is deliberate: the VPN can appear and disappear without ever rewriting the routes your ordinary traffic depends on.
+
+## Hands-on exercises
+
+```bash
+# Inspect the interface
+ip addr show tailscale0
+ip -d link show tailscale0        # -d shows details; look for "tun"
+
+# Compare with Tailscale's own view
+tailscale ip -4
+tailscale status
+
+# See the routing
+ip route show table 52
+ip route get 100.88.1.20          # "which door would this packet use?"
+ip route get 8.8.8.8              # compare: normal internet traffic
+
+# Watch the "packet inside a packet" idea in action
+sudo tcpdump -i tailscale0 icmp               # terminal 1: plain pings visible
+sudo tcpdump -i enp3s0 udp port 41641         # terminal 2: only encrypted UDP
+tailscale ping 100.88.1.20                    # terminal 3 (or plain `ping`)
+```
+
+The two `tcpdump` windows make the concept click. The same ping is readable ICMP on `tailscale0` and unreadable UDP on the physical interface.
+
+## A note for macOS
+
+macOS doesn't use the name `tailscale0`. On a Mac, Tailscale's TUN interface appears as `utun` followed by a number, such as `utun4`. You can find it with:
+
+```zsh
+ifconfig | grep -B3 "inet 100\."
+```
+
+The concept is identical; only the naming and tools (`ifconfig` and `netstat -rn` instead of `ip`) differ.
+
+---
+
+**Summary:** `tailscale0` is a virtual TUN interface whose far end is the `tailscaled` program. Packets sent into it get WireGuard-encrypted and re-sent as UDP through your real interface, which is how your devices can reach each other on `100.x` addresses from anywhere. A separate routing table (52) selected by `ip rule` is what steers tailnet traffic into it, leaving the main table untouched.

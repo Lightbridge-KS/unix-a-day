@@ -13,6 +13,10 @@ book:
       chapters:
         - text: UFW Basics
           href: "contents/firewall/ufw-basics.qmd"
+        - text: Network Interfaces
+          href: "contents/network/network-interfaces.qmd"
+        - text: 'Virtual Interfaces in Practice: tailscale0'
+          href: "contents/network/tailscale0.qmd"
     - part: System Concepts
       chapters:
         - text: File Permission
