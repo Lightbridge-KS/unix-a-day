@@ -1,0 +1,36 @@
+project:
+  type: book
+
+book:
+  title: "Unix a Day"
+  author: "Kittipos Sirivongrungson"
+  date: today
+  repo-url: https://github.com/Lightbridge-KS/unix-a-day
+  site-url: https://unix-a-day-lightbridge.netlify.app
+  chapters:
+    - index.qmd
+    - part: Network
+      chapters:
+        - text: UFW Basics
+          href: "contents/firewall/ufw-basics.qmd"
+    - part: System Concepts
+      chapters:
+        - text: File Permission
+          href: "contents/system/linux-file-permission.qmd"
+    - part: Server Setup
+      chapters:
+        - text: Team Server with Tailscale
+          href: "contents/server-setup/team-server-tailscale.qmd"
+        - text: Shared Team Workspace
+          href: "contents/server-setup/shared-team-workspace.qmd"
+
+format:
+  html:
+    theme:
+      light:
+        - cosmo
+      dark:
+        - darkly
+    toc-depth: 4
+
+freeze: auto

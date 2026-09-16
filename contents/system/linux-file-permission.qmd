@@ -1,0 +1,177 @@
+---
+title: "Linux File System Permissions"
+---
+
+Permissions control **who** can do **what** to files and directories. This applies to your macOS system too since it's Unix-based.
+
+---
+
+## The Permission Model
+
+Every file/directory has three permission types for three user categories:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    FILE PERMISSIONS                     │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│   PERMISSION TYPES          USER CATEGORIES             │
+│   ─────────────────         ────────────────            │
+│   r = read                  u = user (owner)            │
+│   w = write                 g = group                   │
+│   x = execute               o = others (everyone else)  │
+│                             a = all (u + g + o)         │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+### What Permissions Mean
+
+| Permission | For Files | For Directories |
+|------------|-----------|-----------------|
+| `r` (read) | View contents | List files inside |
+| `w` (write) | Modify contents | Create/delete files inside |
+| `x` (execute) | Run as program | Enter (`cd` into) the directory |
+
+---
+
+## Checking Permissions: `ls -l`
+
+```bash
+ls -l myfile.txt
+```
+
+Output breakdown:
+
+```
+-rwxr-xr--  1  alice  staff  4096  Jan 30 10:00  myfile.txt
+│└┬┘└┬┘└┬┘     └──┬─┘ └──┬─┘
+│ │  │  │         │      │
+│ │  │  │         │      └── Group owner
+│ │  │  │         └── User owner
+│ │  │  └── Others: r-- (read only)
+│ │  └── Group: r-x (read + execute)
+│ └── User: rwx (read + write + execute)
+└── File type: - = file, d = directory, l = symlink
+```
+
+---
+
+## Numeric (Octal) Notation
+
+Permissions can be expressed as numbers:
+
+```
+┌───────────────────────────────────┐
+│   r = 4    w = 2    x = 1         │
+├───────────────────────────────────┤
+│                                   │
+│   rwx = 4+2+1 = 7                 │
+│   rw- = 4+2+0 = 6                 │
+│   r-x = 4+0+1 = 5                 │
+│   r-- = 4+0+0 = 4                 │
+│   --- = 0+0+0 = 0                 │
+│                                   │
+├───────────────────────────────────┤
+│   Example: rwxr-xr-- = 754        │
+│            ││││││││└── others: 4  │
+│            │││││└┴┴── group: 5    │
+│            └┴┴┴── user: 7         │
+└───────────────────────────────────┘
+```
+
+---
+
+## Modifying Permissions: `chmod`
+
+### Symbolic Mode
+
+```bash
+# Add execute permission for user
+chmod u+x script.sh
+
+# Remove write permission from group and others
+chmod go-w file.txt
+
+# Set read-only for everyone
+chmod a=r file.txt
+
+# Multiple changes at once
+chmod u+x,g-w,o-rwx file.txt
+```
+
+### Numeric Mode
+
+```bash
+# rwxr-xr-x (owner: all, group: read+exec, others: read+exec)
+chmod 755 script.sh
+
+# rw-r--r-- (owner: read+write, group: read, others: read)
+chmod 644 document.txt
+
+# rwx------ (owner only, full access)
+chmod 700 private_script.sh
+```
+
+---
+
+## Changing Ownership: `chown` and `chgrp`
+
+```bash
+# Change owner
+sudo chown alice file.txt
+
+# Change group
+sudo chgrp staff file.txt
+
+# Change both owner and group
+sudo chown alice:staff file.txt
+
+# Recursive (for directories)
+sudo chown -R alice:staff myfolder/
+```
+
+---
+
+## Common Permission Patterns
+
+```
+┌────────────┬───────────┬────────────────────────────────┐
+│  Numeric   │ Symbolic  │ Use Case                       │
+├────────────┼───────────┼────────────────────────────────┤
+│    755     │ rwxr-xr-x │ Executable scripts, programs   │
+│    644     │ rw-r--r-- │ Regular files (docs, configs)  │
+│    700     │ rwx------ │ Private scripts                │
+│    600     │ rw------- │ Private files (SSH keys)       │
+│    777     │ rwxrwxrwx │ ⚠️ Avoid! Everyone can do all  │
+└────────────┴───────────┴────────────────────────────────┘
+```
+
+---
+
+## Quick Practice
+
+Try these on your Mac:
+
+```bash
+# Create a test file
+echo "Hello" > test.txt
+
+# Check its permissions
+ls -l test.txt
+
+# Make it executable
+chmod +x test.txt
+ls -l test.txt
+
+# Remove all permissions for others
+chmod o-rwx test.txt
+ls -l test.txt
+
+# Set to 644 (common default)
+chmod 644 test.txt
+ls -l test.txt
+
+# Clean up
+rm test.txt
+```

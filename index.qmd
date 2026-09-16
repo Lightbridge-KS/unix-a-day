@@ -1,0 +1,5 @@
+# Preface {.unnumbered}
+
+::: {.callout-note appearance="default" collapse="false"}
+Personal notes on learning the Unix system and its commands, one day at a time.
+:::

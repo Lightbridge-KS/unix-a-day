@@ -1,0 +1,118 @@
+---
+title: "Setup Shared Team Workspace"
+---
+
+
+::: {.callout-note appearance="default" collapse="false"}
+Q: What does this commands do? Please explain.
+
+```zsh
+# Team group + shared folder
+sudo groupadd ramaai
+sudo mkdir -p /srv/ramaai
+sudo chown root:ramaai /srv/ramaai
+sudo chmod 2775 /srv/ramaai   # setgid: files inherit group
+
+# A teammate
+sudo adduser alice
+sudo usermod -aG ramaai alice
+
+# A service account
+sudo useradd --system --shell /usr/sbin/nologin svc-webapp
+```
+:::
+
+
+This script sets up **a shared team workspace** plus two kinds of accounts: a human teammate who can log in, and a service account that runs software but can't log in.
+
+```
+            ┌────────────── group: ramaai ──────────────┐
+            │                                           │
+  alice ────┤ (human, can log in)                       │
+            │                                           │
+            └──────────► /srv/ramaai  (shared folder) ◄─┘
+
+  svc-webapp  (system account, no login, not in ramaai)
+```
+
+## Part 1: Group and shared folder
+
+**`sudo groupadd ramaai`** creates a new group named `ramaai`, recorded in `/etc/group`. Groups are how Linux grants the same access to many users at once.
+
+**`sudo mkdir -p /srv/ramaai`** creates the directory. The `-p` flag creates any missing parent directories and doesn't error if the folder already exists, so the script is safe to re-run. `/srv` is the standard Linux location for data served or shared by the system.
+
+**`sudo chown root:ramaai /srv/ramaai`** sets the owner to `root` and the group to `ramaai`. The syntax is `chown USER:GROUP`.
+
+**`sudo chmod 2775 /srv/ramaai`** sets the permissions. Each digit means something:
+
+```
+   2      7       7       5
+   │      │       │       └─ others: r-x (5 = 4+1)  can enter & read
+   │      │       └───────── group:  rwx (7 = 4+2+1) can create/delete files
+   │      └───────────────── owner:  rwx
+   └──────────────────────── special bit: 2 = setgid
+
+ ls -ld /srv/ramaai  →  drwxrwsr-x  root ramaai
+                              ↑
+                        's' = setgid is on
+```
+
+**Why setgid matters.** Normally a new file gets the creator's *primary* group. With setgid on a directory, new files inherit the *directory's* group instead:
+
+```
+ WITHOUT setgid                    WITH setgid (2775)
+ alice creates report.txt          alice creates report.txt
+ → alice:alice                     → alice:ramaai   ✅
+   (teammates may be locked out)     (whole team can access)
+```
+
+New subdirectories also inherit the setgid bit, so the rule applies all the way down.
+
+**A common gotcha: umask.** Setgid fixes the *group*, but not the *permissions*. With the usual default umask of `022`, new files are created as `rw-r--r--`, so teammates can read them but not edit them. There are two common fixes:
+
+```zsh
+umask 002                                   # per user, e.g. in ~/.profile
+sudo setfacl -d -m g:ramaai:rwx /srv/ramaai # or a default ACL on the folder
+```
+
+## Part 2: A teammate
+
+**`sudo adduser alice`** creates a human user. On Debian or Ubuntu, `adduser` is a friendly interactive wrapper. It does all of the following:
+
+- Creates the home directory `/home/alice` and copies starter files from `/etc/skel`.
+- Creates a personal group `alice` and assigns a normal UID (1000 or higher).
+- Prompts you for a password and the user's name and details.
+
+On RHEL, Fedora, or Rocky, `adduser` is just an alias for the lower-level `useradd`, so it behaves differently there.
+
+**`sudo usermod -aG ramaai alice`** adds alice to the `ramaai` group. The `-a` flag is critical:
+
+```
+ -aG ramaai  → APPEND:  alice's groups = alice, sudo, ramaai  ✅
+  -G ramaai  → REPLACE: alice's groups = alice, ramaai        ❌ (lost sudo!)
+```
+
+The change only applies at alice's **next login**. You can check it with `id alice`.
+
+## Part 3: A service account
+
+**`sudo useradd --system --shell /usr/sbin/nologin svc-webapp`** creates an account meant for running a program, such as a web app under systemd, not for a person:
+
+| Option | Effect |
+|---|---|
+| `useradd` | Low-level tool, non-interactive, fine for scripts |
+| `--system` | Uses a UID below 1000, creates no home directory by default, and sets no password aging |
+| `--shell /usr/sbin/nologin` | Any login attempt is refused with "This account is currently not available" |
+
+This follows the **principle of least privilege**. If the web app gets compromised, the attacker is stuck with an account that can't log in, has no password, and only has the permissions you explicitly give it. That's much safer than running the app as root or as a real user.
+
+## Quick verification
+
+```zsh
+getent group ramaai            # ramaai:x:1001:alice
+ls -ld /srv/ramaai             # drwxrwsr-x 2 root ramaai ...
+id alice                       # uid=1000(alice) ... groups=...,1001(ramaai)
+id svc-webapp                  # uid=998(svc-webapp) ...
+sudo -u svc-webapp whoami      # can still run commands via sudo
+```
+

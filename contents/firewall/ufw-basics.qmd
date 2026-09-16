@@ -1,0 +1,231 @@
+---
+title: "UFW Basics: Uncomplicated Firewall"
+---
+
+`ufw` (Uncomplicated Firewall) is a friendly command-line front-end for Linux's packet filter. Ubuntu ships it by default, and it is available on Debian and most derivatives. It doesn't filter packets itself. It turns simple commands like `ufw allow 22/tcp` into the much more verbose `iptables`/`nftables` rules that the kernel's **netfilter** subsystem enforces.
+
+```
+  You                     Translator                 Kernel (does the real work)
+ ──────                  ────────────               ─────────────────────────────
+ ufw allow 443/tcp  ──►   ufw  ──►  iptables / nftables rules  ──►  netfilter
+                          │                                           │
+                          └─ stores rules in /etc/ufw/                └─ inspects every
+                             (user.rules, before.rules...)               packet in/out
+```
+
+macOS doesn't have `ufw`, since it uses `pf`. To practice, spin up an Ubuntu VM with OrbStack, UTM, or Multipass (`brew install multipass`, then `multipass launch --name fw-lab`). That gives you a disposable machine where locking yourself out costs nothing.
+
+---
+
+## 1. The mental model: policies + rules
+
+Each packet is checked against your rules **top to bottom**, and the **first matching rule wins**. If nothing matches, the **default policy** decides.
+
+```
+ Incoming packet (e.g., TCP to port 443 from 10.1.2.3)
+        │
+        ▼
+ ┌──────────────────────┐   match?  ──yes──►  ALLOW / DENY / REJECT / LIMIT
+ │ Rule 1               │
+ └──────────┬───────────┘
+            │ no
+            ▼
+ ┌──────────────────────┐   match?  ──yes──►  action
+ │ Rule 2               │
+ └──────────┬───────────┘
+            │ no
+            ▼
+          ...
+            │ nothing matched
+            ▼
+ ┌──────────────────────┐
+ │ DEFAULT POLICY       │  (usually: deny incoming, allow outgoing)
+ └──────────────────────┘
+```
+
+The sensible baseline for almost every server is **deny all incoming, allow all outgoing**, then open only what you need:
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+```
+
+---
+
+## 2. Enabling it safely (don't lock yourself out!)
+
+This is the #1 beginner mistake. If you're connected over SSH and enable ufw with a deny-incoming policy, your session gets cut off. **Always allow SSH first:**
+
+```bash
+sudo ufw allow OpenSSH        # or: sudo ufw allow 22/tcp
+sudo ufw enable               # now safe
+sudo ufw status verbose
+```
+
+Example output:
+
+```
+Status: active
+Logging: on (low)
+Default: deny (incoming), allow (outgoing), disabled (routed)
+
+To                         Action      From
+--                         ------      ----
+22/tcp (OpenSSH)           ALLOW IN    Anywhere
+22/tcp (OpenSSH (v6))      ALLOW IN    Anywhere (v6)
+```
+
+ufw handles IPv4 and IPv6 together as long as `IPV6=yes` is set in `/etc/default/ufw`, which is the default. That's why each rule appears twice.
+
+---
+
+## 3. Core commands cheat sheet
+
+| Goal | Command |
+|---|---|
+| Check status | `sudo ufw status` / `status verbose` / `status numbered` |
+| Turn on / off | `sudo ufw enable` / `sudo ufw disable` |
+| Allow a port | `sudo ufw allow 80/tcp` |
+| Allow a port range | `sudo ufw allow 6000:6007/tcp` |
+| Allow from one IP | `sudo ufw allow from 203.0.113.5` |
+| Allow a subnet to a port | `sudo ufw allow from 10.0.0.0/8 to any port 22 proto tcp` |
+| Deny a port | `sudo ufw deny 3306` |
+| Rate-limit (anti brute-force) | `sudo ufw limit 22/tcp` |
+| Delete by rule | `sudo ufw delete allow 80/tcp` |
+| Delete by number | `sudo ufw status numbered`, then `sudo ufw delete 3` |
+| Insert at a position | `sudo ufw insert 1 deny from 198.51.100.7` |
+| Allow on one interface | `sudo ufw allow in on eth1 to any port 5432` |
+| Logging | `sudo ufw logging on` (logs in `/var/log/ufw.log`) |
+| Wipe everything | `sudo ufw reset` |
+| Test without applying | add `--dry-run`, e.g. `sudo ufw --dry-run allow 80` |
+
+### The full rule grammar
+
+Most commands are shorthand for this general form:
+
+```
+ufw [insert N] ACTION [in|out] [on IFACE] [proto PROTO]
+    from SRC [port SPORT]  to DST [port DPORT]
+
+ ACTION = allow | deny | reject | limit
+```
+
+---
+
+## 4. `deny` vs `reject` vs `limit`
+
+```
+ deny    ──►  silently drop the packet
+              client waits... and times out (stealthy, slower for attacker)
+
+ reject  ──►  drop + send back "connection refused" (ICMP/TCP RST)
+              client fails fast (friendlier on internal networks)
+
+ limit   ──►  allow, BUT block an IP that opens ≥ 6 connections in 30 sec
+              great for SSH brute-force protection
+```
+
+---
+
+## 5. Order matters: a classic trap
+
+Say you want to block one bad IP, but you already allowed SSH for everyone:
+
+```bash
+sudo ufw allow 22/tcp
+sudo ufw deny from 198.51.100.7     # appended as rule #2
+```
+
+```
+ [1] ALLOW 22/tcp from Anywhere        ◄── 198.51.100.7 matches HERE first → allowed!
+ [2] DENY  from 198.51.100.7           ◄── never reached for SSH traffic
+```
+
+The fix is to **insert** the deny rule above the allow:
+
+```bash
+sudo ufw insert 1 deny from 198.51.100.7
+```
+
+---
+
+## 6. Application profiles
+
+Packages can register named profiles in `/etc/ufw/applications.d/`, so you don't have to remember port numbers:
+
+```bash
+sudo ufw app list                    # e.g. OpenSSH, Nginx Full, Nginx HTTP, Nginx HTTPS
+sudo ufw app info "Nginx Full"       # shows ports 80,443/tcp
+sudo ufw allow "Nginx Full"
+```
+
+---
+
+## 7. A realistic example: a web app server on a hospital network
+
+Scenario: a server hosts a web app over HTTPS for everyone. SSH should come only from an internal admin subnet, and PostgreSQL only from the app server.
+
+```
+            Internet / hospital users
+                     │  443
+                     ▼
+ ┌───────────────────────────────────────────┐
+ │  Server (ufw)                              │
+ │   443/tcp  ← anyone                        │
+ │    22/tcp  ← 10.10.0.0/16 only (limited)   │
+ │  5432/tcp  ← 10.10.5.20 only               │
+ │  everything else ← DENIED                  │
+ └───────────────────────────────────────────┘
+```
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+
+sudo ufw limit from 10.10.0.0/16 to any port 22 proto tcp
+sudo ufw allow 443/tcp
+sudo ufw allow from 10.10.5.20 to any port 5432 proto tcp
+
+sudo ufw enable
+sudo ufw status numbered
+```
+
+---
+
+## 8. Important gotcha: Docker bypasses ufw
+
+This one matters for R&D teams deploying containers. When you publish a port with `docker run -p 8080:80`, Docker writes its own iptables rules. Those rules are evaluated **before** ufw's rules, so the port can be reachable from outside **even though `ufw status` doesn't show it as allowed**.
+
+```
+ packet ──► Docker's DOCKER-USER / FORWARD chain ──► container   (ufw never consulted!)
+        └─► ufw chains (INPUT) ──► host services
+```
+
+There are a few common mitigations:
+
+* **Bind to localhost** and put a reverse proxy in front: `-p 127.0.0.1:8080:80`.
+* **Add rules to the `DOCKER-USER` chain** yourself.
+* **Use a helper** such as the community `ufw-docker` project.
+
+---
+
+## 9. Where things live
+
+```
+/etc/default/ufw               # global settings (IPV6=yes, default forward policy)
+/etc/ufw/user.rules            # rules you add via `ufw allow...` (IPv4)
+/etc/ufw/user6.rules           # same, IPv6
+/etc/ufw/before.rules          # rules applied before yours (e.g., ICMP ping, NAT)
+/etc/ufw/applications.d/       # app profiles
+/var/log/ufw.log               # log output (when logging is on)
+```
+
+---
+
+## Try it yourself (in a VM)
+
+1. Set the default policies, allow SSH, and enable ufw.
+2. Install nginx (`sudo apt install nginx`) and allow only `"Nginx HTTP"`.
+3. From your Mac, run `curl http://<vm-ip>`. It should work.
+4. Run `sudo ufw delete allow "Nginx HTTP"` and curl again. It should now hang, because the packet is being dropped.
+5. Change the rule to `reject` instead of removing it, and notice how curl now fails instantly instead of timing out.

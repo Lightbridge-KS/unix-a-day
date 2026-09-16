@@ -1,0 +1,151 @@
+---
+title: "Setting up Ubuntu server with Tailscale team access"
+---
+
+Think of it as **two locks in a row**: Tailscale decides *who can reach* the box and on which ports, and Ubuntu decides *what they can do* once inside. The key design rule for both is **one real identity per person, no shared logins**. That rule is what makes adding or removing a teammate easy later.
+
+```
+ Teammate device
+       │ WireGuard (encrypted)
+       ▼
+┌ Lock 1: Tailnet policy ───┐
+│ user/group → tag + port   │
+└───────────┬───────────────┘
+            ▼
+┌ Lock 2: Ubuntu box ───────┐
+│ Linux user, groups, sudo  │
+└───────────────────────────┘
+```
+
+---
+
+### Step 0: Choose the tailnet first
+
+Your personal devices are likely already in a personal tailnet (Tailscale auto-names it something like `tailXXXXXX`). For a team server, I'd create a **separate RAMAAI tailnet** backed by the `ramaai-dev` GitHub org. You must be the owner of the GitHub organization, and after the tailnet is created, any user in the org can join it; you can also invite people outside the org. The tailnet then belongs to the team instead of your personal Google account. Decide carefully, because you cannot migrate a tailnet to or from GitHub as an identity provider.
+
+The other option is to invite teammates into your personal tailnet. That works, but it mixes your personal devices with team access. Your Mac and iPad can be signed in to both tailnets and switch between them.
+
+Cost: the Personal plan permits 6 free users in a single tailnet, and all plans include 50 tagged devices. If the team grows past that, educational institutions receive a 50% discount off list prices.
+
+---
+
+### Step 1: Ubuntu accounts
+
+```
+HUMANS (can log in)
+ kittipos → sudo, ramaai
+ alice    → ramaai
+ bob      → ramaai
+SERVICES (no shell)
+ svc-webapp, svc-api …
+SHARED
+ group ramaai → /srv/ramaai
+```
+
+- **Installer user = you.** Name it `kittipos`, not a generic `admin`. It gets sudo, and root stays locked (Ubuntu's default).
+- **Teammates get normal accounts** in a `ramaai` group, so they can share project files without needing sudo.
+- **Each app runs as its own no-login system user** (or in a container). If one app is compromised, it can't touch the others' files.
+- **Treat the `docker` group like sudo.** Anyone in that group can effectively become root.
+
+```bash
+# Team group + shared folder
+sudo groupadd ramaai
+sudo mkdir -p /srv/ramaai
+sudo chown root:ramaai /srv/ramaai
+sudo chmod 2775 /srv/ramaai   # setgid: files inherit group
+
+# A teammate
+sudo adduser alice
+sudo usermod -aG ramaai alice
+
+# A service account
+sudo useradd --system --shell /usr/sbin/nologin svc-webapp
+```
+
+---
+
+### Step 2: Tailscale identity (users vs. tags)
+
+People sign in as **users**, and the server gets a **tag**. Tags are ideal for devices you don't want linked to one person, because removing a user also removes all their devices. Tags have another benefit: when you first tag and authenticate a device, its key expiry is disabled by default, so the server won't drop off the network unexpectedly.
+
+Set up roles like this: you as **Owner**, one more trusted person as **Admin** (so you aren't a single point of failure), and everyone else as **Member**. Tailscale also requires one identity per person: a Tailscale user account may not be shared or used by multiple individuals.
+
+---
+
+### Step 3: The policy file
+
+A new tailnet starts as allow-all, so replace the whole default file. Tailscale recommends grants for all new policy files, because the older ACL syntax won't receive new features.
+
+```jsonc
+{
+  "groups": {
+    "group:admin": ["you@github"],
+    "group:dev":   ["alice@github", "bob@github"]
+  },
+  "tagOwners": {
+    "tag:ramaai-server": ["group:admin"]
+  },
+  "grants": [
+    { // team: web apps + SSH
+      "src": ["group:dev"],
+      "dst": ["tag:ramaai-server"],
+      "ip":  ["tcp:443", "tcp:22"]
+    },
+    { // admins: all ports
+      "src": ["group:admin"],
+      "dst": ["tag:ramaai-server"],
+      "ip":  ["*"]
+    },
+    { // each person's own devices
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:self"],
+      "ip":  ["*"]
+    }
+  ],
+  "ssh": [
+    { // admins must re-auth in browser
+      "action": "check",
+      "src":   ["group:admin"],
+      "dst":   ["tag:ramaai-server"],
+      "users": ["autogroup:nonroot"]
+    },
+    { // one rule per teammate
+      "action": "accept",
+      "src":   ["alice@github"],
+      "dst":   ["tag:ramaai-server"],
+      "users": ["alice"]
+    }
+  ]
+}
+```
+
+Teammates get one SSH rule each because of this warning in the docs: if `autogroup:nonroot` stays in the users field, anyone allowed by the source can SSH in as any non-root user on the destination. In practice, Alice could log in as `kittipos`. Copy the exact login names from the admin console's Users page rather than guessing them.
+
+---
+
+### Step 4: Join the server
+
+1. In the admin console, generate an **auth key** pre-assigned `tag:ramaai-server`. The tag must already exist in `tagOwners`.
+2. On the box, run:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --auth-key=tskey-auth-XXXX \
+  --ssh --hostname=ramaai-box
+```
+
+The `--ssh` flag turns on Tailscale SSH, so `ssh alice@ramaai-box` works with no SSH keys to manage; the tailnet login is the credential. The Linux account must still exist from Step 1.
+
+---
+
+### Step 5: Lock the front door
+
+```bash
+sudo ufw default deny incoming
+sudo ufw allow in on tailscale0
+sudo ufw enable
+```
+
+Only run this after you've confirmed Tailscale SSH works, or while you have physical console access, or you can lock yourself out. There's also a common trap: **Docker's published ports bypass UFW**. Bind containers to `127.0.0.1` and expose them through Tailscale instead.
+
+Since the box will likely sit on the hospital network, check with hospital IT before connecting it. Keep patient-identifiable data off it unless that's approved.
