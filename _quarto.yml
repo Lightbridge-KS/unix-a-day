@@ -13,6 +13,12 @@ book:
       chapters: 
         - text: tr
           href: contents/textual/tr.qmd
+    - part: Redirect
+      chapters: 
+        - text: I/O Redirect
+          href: "contents/redirect/io-redirect.qmd"
+        - text: "2>"
+          href: "contents/redirect/2gt.qmd"
     - part: Network
       chapters:
         - text: UFW Basics

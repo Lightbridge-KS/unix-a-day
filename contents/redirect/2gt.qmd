@@ -1,0 +1,74 @@
+---
+title: "`2>`"
+---
+
+`2>` shows up constantly in AI-agent-generated commands because agents need to know *whether a command succeeded and why*, separately from its actual output. Let's build up to it.
+
+## Why there are two output streams, not one
+
+```
+        stdout (fd 1)  →  the "real" output (results, data)
+        stderr (fd 2)  →  errors, warnings, diagnostics
+```
+
+Both go to your terminal screen by default, so visually they look mixed together. But they're two *separate pipes*, and each can be redirected independently. That separation exists so that:
+
+- normal output can be piped/saved cleanly (e.g. `grep foo file.txt > results.txt` won't get polluted by "file not found" messages)
+- error messages don't silently get swallowed if you're capturing output
+
+## What `2>` does
+
+`2` is just the file descriptor number for stderr. So:
+
+```bash
+some_command 2> errors.log
+```
+
+```
+some_command
+   ├── stdout ──▶ terminal (unchanged)
+   └── stderr ──▶ errors.log
+```
+
+Only the error stream is redirected; normal output still prints to screen.
+
+## Why AI agents lean on this heavily
+
+**1. Suppress noise while keeping real output**
+```bash
+npm install 2> /dev/null
+```
+`/dev/null` is a "black hole" file — discards whatever's written to it. This hides warning spam but still shows the actual command output.
+
+**2. Capture *only* errors to check success/failure**
+```bash
+output=$(some_command 2>&1)
+```
+This is the big one. `2>&1` means "send stderr to wherever stdout is currently going." Combined with `$(...)` capturing stdout, the agent gets *both* streams merged into one variable it can inspect programmatically — e.g. `grep -i "error"` on the result, or check `$?` (the exit code) alongside it.
+
+```
+        stdout ──┐
+                  ├──▶ merged into one stream ──▶ captured by agent
+        stderr ──┘
+```
+
+**3. Silence everything except a specific signal**
+```bash
+command > /dev/null 2>&1
+```
+Order matters here: this redirects stdout to null *first*, then points stderr at "wherever stdout now goes" (also null). Agents use this when they only care about the exit code (`$?`), not any text output at all — e.g. "did this succeed, yes/no."
+
+**4. Debugging loops**
+An agent running many shell commands autonomously wants to distinguish "command ran fine but returned no results" from "command actually errored." Keeping stderr separate (or explicitly merged and labeled) lets it parse that distinction reliably instead of guessing from mixed text.
+
+## Quick reference
+
+| Pattern | Meaning |
+|---|---|
+| `2> file` | send errors only to a file |
+| `2> /dev/null` | discard errors, keep stdout visible |
+| `2>&1` | merge stderr into stdout |
+| `> file 2>&1` | send both stdout and stderr to same file |
+| `&> file` | shorthand for the line above (bash/zsh only) |
+
+One order-of-operations gotcha worth internalizing: `2>&1 > file` does **not** do what people expect — it merges stderr to the *old* stdout (terminal), then redirects stdout to `file`, so stderr stays on screen. Redirections are applied left-to-right, so `> file 2>&1` is the correct order to merge both into a file.

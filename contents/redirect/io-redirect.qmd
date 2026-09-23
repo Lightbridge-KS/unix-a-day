@@ -1,0 +1,60 @@
+---
+title: "I/O Redirection"
+---
+
+
+These are I/O redirection operators, and they trip people up because `tr` itself never "sees" a filename here.
+
+## The core idea
+
+Every process starts with three open connections ("streams"):
+
+```
+        stdin  (0)  ──▶  the program reads input from here
+        stdout (2)  ◀──  the program writes normal output here
+        stderr (2)  ◀──  the program writes error messages here
+```
+
+By default, stdin is your keyboard, and stdout/stderr are your terminal screen. Redirection just tells the shell "instead of keyboard/screen, connect this stream to a file."
+
+## `<` and `>`
+
+- `<` file — **feed this file in as stdin** ("read from")
+- `>` file — **send stdout into this file** ("write to", overwrites)
+
+## Your example
+
+```bash
+tr -d '\r' < win.txt > unix.txt
+```
+
+```
+win.txt ──▶ [ stdin ]  tr -d '\r'  [ stdout ] ──▶ unix.txt
+```
+
+Step by step:
+1. `< win.txt` — the shell opens `win.txt` and connects it to `tr`'s stdin, *as if* you had typed its contents on the keyboard.
+2. `tr -d '\r'` — reads that stream character-by-character and deletes every `\r` (carriage return) byte, the extra character Windows adds before each newline.
+3. `> unix.txt` — instead of printing the result to your screen, the shell connects `tr`'s stdout to `unix.txt`, creating/overwriting it with the cleaned text.
+
+Important: **the shell** sets up these connections before `tr` even runs — `tr` itself has no idea files are involved. That's why `tr` (and `wc`, `sort`, `grep`, etc.) can also be used in pipelines: they just read stdin and write stdout, and it's the shell's job to decide whether that's a keyboard/screen, a file, or another program.
+
+## A quick mnemonic
+
+The arrow points in the direction data flows:
+- `<` — data flows *left*, from file into the command
+- `>` — data flows *right*, from command into file
+
+## Bonus, since you use both zsh and bash
+
+This particular syntax (`<`, `>`, `|`) is POSIX shell syntax — identical in `bash` and `zsh`. Where they differ is more in scripting features (arrays, globbing options, prompt config), not basic redirection. So anything I show you here is safe in either shell.
+
+A couple of related operators worth knowing right away, since they're easy to confuse:
+
+| Operator | Meaning |
+|---|---|
+| `>` | overwrite stdout to file |
+| `>>` | append stdout to file |
+| `2>` | redirect stderr only |
+| `&>` | redirect both stdout and stderr (bash/zsh) |
+| `<<<` | "here string" — feed a literal string as stdin |
