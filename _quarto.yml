@@ -9,6 +9,10 @@ book:
   site-url: https://unix-a-day-lightbridge.netlify.app
   chapters:
     - index.qmd
+    - part: Textual
+      chapters: 
+        - text: tr
+          href: contents/textual/tr.qmd
     - part: Network
       chapters:
         - text: UFW Basics

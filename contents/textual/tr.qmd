@@ -1,0 +1,87 @@
+---
+title: "`tr`: Translate"
+---
+
+`tr` (short for **translate**) is a Unix filter that transforms characters in its input stream — one character at a time — and writes the result to stdout. It doesn't work on lines or fields like `sed`/`awk`; it works on a pure character-by-character basis.
+
+## Basic shape
+
+```
+tr [OPTIONS] SET1 [SET2]
+```
+
+- It reads from **stdin only** (no filename argument — you must pipe or redirect input in).
+- **SET1** and **SET2** are lists of characters, expressed as literal characters, ranges (`a-z`), or POSIX classes (`[:upper:]`, `[:digit:]`, etc).
+
+```
+        stdin            tr SET1 SET2           stdout
+  ──────────────►    ┌───────────────────┐   ──────────────►
+   "Hello"           │ each char in SET1 │      "Uryyb"
+                     │ mapped to same    │
+                     │ position in SET2  │
+                     └───────────────────┘
+```
+
+## Core uses
+
+**1. Translate (replace) characters — the default mode**
+
+Each character in SET1 is replaced by the character at the same position in SET2.
+
+```bash
+echo "Hello World" | tr 'a-z' 'A-Z'
+# HELLO WORLD
+
+echo "hello" | tr 'el' 'ip'
+# hippo   (e→i, l→p)
+```
+
+**2. Delete characters — `-d`**
+
+Removes every character found in SET1. No SET2 needed.
+
+```bash
+echo "h3ll0 w0rld" | tr -d '0-9'
+# hll wrld
+```
+
+**3. Squeeze repeats — `-s`**
+
+Collapses consecutive runs of a repeated character into a single instance.
+
+```bash
+echo "aaabbbccc" | tr -s 'a-c'
+# abc
+
+echo "too    many   spaces" | tr -s ' '
+# too many spaces
+```
+
+**4. Complement — `-c`**
+
+Inverts SET1 to mean "everything *not* in this set."
+
+```bash
+echo "hello123world" | tr -cd '0-9'
+# 123     (keep only digits, delete everything else)
+```
+
+## Everyday one-liners
+
+```bash
+# Convert Windows line endings to Unix
+tr -d '\r' < win.txt > unix.txt
+
+# Count words (translate spaces to newlines, then count lines)
+echo "one two three" | tr ' ' '\n' | wc -l
+
+# Strip non-printable / control characters
+cat file | tr -cd '[:print:]\n'
+
+# ROT13 (classic party trick)
+echo "hello" | tr 'a-zA-Z' 'n-za-mN-ZA-M'
+```
+
+## On zsh vs bash
+
+`tr` itself is an external binary (`/usr/bin/tr`), not a shell builtin — so it behaves **identically in zsh and bash**. macOS ships the BSD version of `tr`, which has slightly different flag support than GNU `tr` (e.g. no `--help`, and character-class syntax can be pickier). If you `brew install coreutils`, you'd get GNU `tr` as `gtr`, which is a bit more forgiving with things like Unicode ranges.
